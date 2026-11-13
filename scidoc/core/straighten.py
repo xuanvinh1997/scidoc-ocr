@@ -149,8 +149,39 @@ def detect_frame(img: Image.Image, strip: int | None = None) -> Frame | None:
     br = _intersect(bottom, right, (w * 0.9, h * 0.9))
     if not (tl[0] < tr[0] and bl[0] < br[0] and tl[1] < bl[1] and tr[1] < br[1]):
         return None
-    support = min(horiz[0][3], horiz[1][3], vert[0][3], vert[1][3])
-    return Frame(top, bottom, left, right, tl, tr, bl, br, support)
+    frame = Frame(top, bottom, left, right, tl, tr, bl, br, 0.0)
+    # A real frame is one unbroken line on every side. Rows of boxes in a flowchart, or a plot
+    # with only two axes, line up into "edges" with gaps: reject them instead of warping.
+    edges = [_ink_coverage(mask, line) for line in edge_polylines(frame, 200)]
+    frame.support = min(c for c, _ in edges)
+    if frame.support < MIN_COVERAGE or max(g for _, g in edges) > MAX_GAP:
+        return None
+    return frame
+
+
+MIN_COVERAGE = 0.9  # fraction of each edge that must lie on ink
+MAX_GAP = 0.06  # longest break allowed along an edge, as a fraction of its length
+
+
+def _ink_coverage(mask: np.ndarray, line: list[Point], r: int = 3) -> tuple[float, float]:
+    """(fraction of points with ink within ``r`` px, longest run without ink as a fraction)."""
+    h, w = mask.shape
+    hit = np.array([mask[max(0, int(y) - r):int(y) + r + 1, max(0, int(x) - r):int(x) + r + 1].any()
+                    for x, y in line])
+    gaps = np.diff(np.flatnonzero(np.r_[True, hit, True])) - 1
+    return float(hit.mean()), float(gaps.max() / len(hit))
+
+
+def distortion(frame: Frame) -> float:
+    """Largest distance (px) between the frame and the axis-aligned rectangle it maps to."""
+    f = frame
+    worst = 0.0
+    for line in edge_polylines(f, 40):
+        pts = np.array(line)
+        horizontal = np.ptp(pts[:, 0]) > np.ptp(pts[:, 1])
+        k = 1 if horizontal else 0
+        worst = max(worst, float(np.ptp(pts[:, k])))
+    return worst
 
 
 # --------------------------------------------------------------------------- warp
@@ -216,3 +247,70 @@ def straighten(img: Image.Image, frame: Frame | None = None) -> tuple[Image.Imag
     fill = np.median(border, axis=0)
     out = _bilinear(src, sx, sy, fill)
     return Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8)), frame
+
+
+# --------------------------------------------------------------------------- manual handles
+
+# Handle order used by the UI: corners and edge midpoints, clockwise from top-left.
+HANDLE_NAMES = ("tl", "tm", "tr", "rm", "br", "bm", "bl", "lm")
+
+
+def _through3(a: float, b: float, c: float, fa: float, fb: float, fc: float) -> Curve | None:
+    """Quadratic f with f(a)=fa, f(b)=fb, f(c)=fc (None when the abscissas collapse)."""
+    if not (a < b < c) or min(b - a, c - b) < 1e-3:
+        return None
+    return np.linalg.solve(np.vander(np.array([a, b, c], dtype=float), 3), np.array([fa, fb, fc], dtype=float))
+
+
+def frame_from_handles(pts: list[Point]) -> Frame | None:
+    """Frame from 8 handles (see HANDLE_NAMES); each edge is the parabola through its three handles."""
+    tl, tm, tr, rm, br, bm, bl, lm = pts
+    top = _through3(tl[0], tm[0], tr[0], tl[1], tm[1], tr[1])
+    bottom = _through3(bl[0], bm[0], br[0], bl[1], bm[1], br[1])
+    left = _through3(tl[1], lm[1], bl[1], tl[0], lm[0], bl[0])
+    right = _through3(tr[1], rm[1], br[1], tr[0], rm[0], br[0])
+    if any(c is None for c in (top, bottom, left, right)):
+        return None
+    return Frame(top, bottom, left, right, tuple(tl), tuple(tr), tuple(bl), tuple(br), 1.0)
+
+
+def handles_for(frame: Frame | None, size: tuple[int, int], inset: float = 0.06) -> list[Point]:
+    """8 handle positions for ``frame`` (or an inset rectangle when there is none)."""
+    w, h = size
+    if frame is None:
+        x0, y0, x1, y1 = w * inset, h * inset, w * (1 - inset), h * (1 - inset)
+        return [(x0, y0), ((x0 + x1) / 2, y0), (x1, y0), (x1, (y0 + y1) / 2),
+                (x1, y1), ((x0 + x1) / 2, y1), (x0, y1), (x0, (y0 + y1) / 2)]
+    f = frame
+    xt = (f.tl[0] + f.tr[0]) / 2
+    xb = (f.bl[0] + f.br[0]) / 2
+    yl = (f.tl[1] + f.bl[1]) / 2
+    yr = (f.tr[1] + f.br[1]) / 2
+    return [f.tl, (xt, float(np.polyval(f.top, xt))), f.tr, (float(np.polyval(f.right, yr)), yr),
+            f.br, (xb, float(np.polyval(f.bottom, xb))), f.bl, (float(np.polyval(f.left, yl)), yl)]
+
+
+def edge_polylines(frame: Frame, n: int = 48) -> list[list[Point]]:
+    """The four frame edges as polylines (for drawing)."""
+    f = frame
+    xt = np.linspace(f.tl[0], f.tr[0], n)
+    xb = np.linspace(f.bl[0], f.br[0], n)
+    yl = np.linspace(f.tl[1], f.bl[1], n)
+    yr = np.linspace(f.tr[1], f.br[1], n)
+    return [list(zip(xt, np.polyval(f.top, xt))), list(zip(np.polyval(f.right, yr), yr)),
+            list(zip(xb, np.polyval(f.bottom, xb))), list(zip(np.polyval(f.left, yl), yl))]
+
+
+def scaled(frame: Frame, s: float) -> Frame:
+    """The same frame for an image scaled by ``s`` (used for fast previews)."""
+    pts = [(x * s, y * s) for x, y in handles_for(frame, (0, 0))]
+    return frame_from_handles(pts) or frame
+
+
+def auto_straighten(img: Image.Image) -> Image.Image:
+    """Straighten when a confident frame is found, else return ``img`` untouched."""
+    frame = detect_frame(img)
+    # Flat scans need no warp: resampling would only blur them.
+    if frame is None or distortion(frame) < 2.0:
+        return img
+    return straighten(img, frame)[0]

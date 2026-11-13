@@ -45,6 +45,7 @@ class AppSettings:
     auto_run: bool = True
     page_size: str = "A4"
     layout_detect: bool = True  # crop figures with the layout model when the OCR model gives no boxes
+    straighten_figures: bool = True  # unbend photographed plots using their frame
 
     @classmethod
     def load(cls) -> "AppSettings":
@@ -187,6 +188,11 @@ class SettingsDialog(QDialog):
         f2.addRow("Max tokens per page", self.max_tokens)
         f2.addRow(self.auto_run)
         f2.addRow(self.layout_detect)
+        self.straighten = QCheckBox("Straighten photographed figures (page curl, perspective) using the plot frame")
+        self.straighten.setChecked(settings.straighten_figures)
+        self.straighten.setToolTip("Applies to cropped figures that have a four-sided frame or axes box.\n"
+                                   "Use Crop image → Straighten… to adjust any figure by hand.")
+        f2.addRow(self.straighten)
         lay.addWidget(proc)
 
         # --- snip
@@ -265,6 +271,7 @@ class SettingsDialog(QDialog):
         s.max_tokens = self.max_tokens.value()
         s.auto_run = self.auto_run.isChecked()
         s.layout_detect = self.layout_detect.isChecked()
+        s.straighten_figures = self.straighten.isChecked()
         s.snip_task = self.snip_task.currentData()
         s.formula_copy = self.formula_copy.currentData()
         s.page_size = self.page_size.currentText()

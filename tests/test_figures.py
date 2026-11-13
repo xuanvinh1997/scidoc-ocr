@@ -94,3 +94,8 @@ def test_caption_regex_skips_body_text_mentioning_a_figure():
     for cap in ("Figure 1.8 — Dispersion law", "Fig. 2: Setup", "**Figure 3.** Loss", "Hình 4. Sơ đồ", "Рис. 5 – x"):
         assert CAPTION_RE.match(cap), cap
     assert not CAPTION_RE.match("Figure 2 shows that the loss decreases.")
+
+
+def test_insert_figure_keeps_single_blank_lines():
+    out = insert_figure("Text above.\n\n*[Figure: P]*\n\nText below.\n", "![P](figures/a.png)")
+    assert out == "Text above.\n\n![P](figures/a.png)\n\nText below.\n"

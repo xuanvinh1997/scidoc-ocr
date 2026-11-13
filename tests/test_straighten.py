@@ -46,3 +46,15 @@ def test_curved_frame_becomes_straight():
     for curve in (f2.top, f2.bottom):
         ys = np.polyval(curve, xs)
         assert np.ptp(ys - np.polyval(np.polyfit(xs, ys, 1), xs)) < 3  # was ~30 px of sag
+
+
+def test_flowchart_boxes_are_not_a_frame():
+    """Rows of boxes line up into broken 'edges': must not be taken for a frame and warped."""
+    img = Image.new("RGB", (800, 580), "white")
+    d = ImageDraw.Draw(img)
+    for y in (40, 250, 470):
+        for x in (10, 290, 560):
+            d.rounded_rectangle((x, y, x + 200, y + 80), 8, fill=(30, 50, 160), outline="black", width=3)
+        d.line((210, y + 40, 290, y + 40), fill="black", width=3)
+    assert detect_frame(img) is None
+    assert straighten(img)[0] is img

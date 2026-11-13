@@ -43,6 +43,7 @@ class FigureStore:
         self.base = (root or cache_root()) / (digest or "_unsaved")
         self.dir = self.base / FIGURES_DIR
         self._lock = threading.Lock()
+        self.auto_straighten = False  # straighten photographed plots by their frame when cropping
 
     def save(self, img: Image.Image, page_index: int) -> str:
         """Store ``img`` as the next free ``p<page>-fig<k>.png``; return the Markdown-relative path."""
@@ -65,6 +66,15 @@ def crop(page: Image.Image, box: Box, pad: float = 0.004) -> Image.Image:
     left, top = max(0, int((x1 - pad) * w)), max(0, int((y1 - pad) * h))
     right, bottom = min(w, int((x2 + pad) * w + 0.5)), min(h, int((y2 + pad) * h + 0.5))
     return page.crop((left, top, max(left + 1, right), max(top + 1, bottom)))
+
+
+def crop_figure(page: Image.Image, box: Box, store: FigureStore) -> Image.Image:
+    img = crop(page, box)
+    if store.auto_straighten:
+        from .straighten import auto_straighten
+
+        img = auto_straighten(img)
+    return img
 
 
 def reading_order(boxes: Iterable[Box]) -> list[Box]:
@@ -170,7 +180,7 @@ def materialize(md: str, page: Image.Image, page_index: int, store: FigureStore,
         box = tuple(float(m.group(i)) for i in range(2, 6))
         if not _valid(box):
             return ""
-        return f"![{m.group(1) or 'Figure'}]({store.save(crop(page, box), page_index)})"
+        return f"![{m.group(1) or 'Figure'}]({store.save(crop_figure(page, box, store), page_index)})"
 
     md = BBOX_MARK_RE.sub(from_marker, md)
     boxes = [b for b in (detected or []) if _valid(b)]
@@ -182,7 +192,7 @@ def materialize(md: str, page: Image.Image, page_index: int, store: FigureStore,
         def from_placeholder(m: re.Match) -> str:
             if not queue:
                 return m.group(0)
-            rel = store.save(crop(page, queue.pop(0)), page_index)
+            rel = store.save(crop_figure(page, queue.pop(0), store), page_index)
             return f"\n\n![{m.group(1).strip() or 'Figure'}]({rel})\n\n"
 
         md = PLACEHOLDER_RE.sub(from_placeholder, md)
@@ -190,7 +200,7 @@ def materialize(md: str, page: Image.Image, page_index: int, store: FigureStore,
     blocks = split_blocks(md)
     inserts: dict[int, list[str]] = {}
     for pic, at in zip(queue, _insertion_points(blocks, queue, text_boxes)):
-        inserts.setdefault(at, []).append(f"![Figure]({store.save(crop(page, pic), page_index)})")
+        inserts.setdefault(at, []).append(f"![Figure]({store.save(crop_figure(page, pic, store), page_index)})")
     out: list[str] = []
     for i in range(len(blocks) + 1):
         out.extend(inserts.get(i, []))
@@ -203,9 +213,11 @@ def insert_figure(md: str, link: str, position: int | None = None) -> str:
     """Put an image link into a page: replace the first placeholder, else insert at ``position`` (default end)."""
     m = PLACEHOLDER_RE.search(md)
     if m:
-        return md[: m.start()] + f"\n\n{link}\n\n" + md[m.end():]
-    pos = len(md) if position is None else max(0, min(len(md), position))
-    return md[:pos].rstrip("\n") + ("\n\n" if md[:pos].strip() else "") + link + "\n\n" + md[pos:].lstrip("\n")
+        out = md[: m.start()] + f"\n\n{link}\n\n" + md[m.end():]
+    else:
+        pos = len(md) if position is None else max(0, min(len(md), position))
+        out = md[:pos].rstrip("\n") + ("\n\n" if md[:pos].strip() else "") + link + "\n\n" + md[pos:].lstrip("\n")
+    return re.sub(r"\n{3,}", "\n\n", out)
 
 
 # --------------------------------------------------------------------------- export helpers

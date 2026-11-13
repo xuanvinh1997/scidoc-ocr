@@ -47,12 +47,14 @@ from ..core.export import FIGURE_FOLDER_FORMATS, FORMATS, export_text
 from ..core.figures import PLACEHOLDER_RE, FigureStore, copy_figures, file_urls, inline_images, insert_figure
 from ..core.layout import LayoutDetector, available as layout_available
 from ..core.pdf_export import html_to_pdf_async
+from ..core.straighten import auto_straighten
 from ..core.render import ASSETS, html_document, pages_to_html
 from ..core.sources import SUPPORTED_EXTS, Source, open_source, source_from_image
 from .downloads import DownloadManager
 from .model_manager import ModelManagerDialog, fmt_bytes
 from .settings import AppSettings, SettingsDialog
 from .snip import SnipOverlay
+from .straighten_dialog import StraightenDialog
 from .ui import (
     STATUS_ROLE,
     FloatingBar,
@@ -190,7 +192,11 @@ class PageView(QGraphicsView):
             return
         self.resetTransform()
         w = self.item.pixmap().width()
-        s = (self.viewport().width() - 24) / max(1, w)
+        # Use the width *with* a vertical scrollbar, whether or not it is showing: otherwise a page
+        # whose fitted height is close to the view height toggles the scrollbar forever
+        # (scrollbar on → narrower → smaller → scrollbar off → wider → …) and the UI hangs.
+        avail = self.maximumViewportSize().width() - self.verticalScrollBar().sizeHint().width()
+        s = (avail - 24) / max(1, w)
         self.scale(s, s)
         self._place_bar()
 
@@ -460,6 +466,8 @@ class MainWindow(QMainWindow):
         insert = tool_button("image", "Insert the selected region into the result as an image",
                              self.insert_selection, text="Insert into result", role="white", object_name="Accent")
         crop_bar.add(insert)
+        crop_bar.add(tool_button("straighten", "Straighten the selection by hand (page curl, perspective)…",
+                                 self.straighten_selection, text="Straighten…"))
         crop_bar.add(tool_button("copy", "Copy the selected region as an image", self.copy_selection, text="Copy"))
         crop_bar.add(tool_button("save", "Save the selected region as PNG", self.save_selection, text="Save…"))
         self.page_view.set_crop_bar(crop_bar)
@@ -1084,6 +1092,7 @@ class MainWindow(QMainWindow):
         if not indices:
             self.status_label.setText("All pages already recognised. Use Re-run page to redo one.")
             return
+        doc.figures.auto_straighten = self.settings.straighten_figures
         jobs = []
         for i in indices:
             p = doc.source.pages[i]
@@ -1262,19 +1271,32 @@ class MainWindow(QMainWindow):
         if on:
             self.status_label.setText("Drag around a figure on the page. Esc to cancel.")
 
-    def _selection_image(self) -> Image.Image | None:
+    def _selection_image(self, prepared: bool = True) -> Image.Image | None:
+        """The selected region; ``prepared`` applies automatic straightening when it is enabled."""
         r, doc = self.page_view.selection(), self.doc
         if r is None or doc is None:
             return None
         img = doc.source.pages[self.cur_page].image
         box = (int(r.left()), int(r.top()), int(r.right() + 0.5), int(r.bottom() + 0.5))
-        return img.crop(box)
+        img = img.crop(box)
+        if prepared and self.settings.straighten_figures:
+            img = auto_straighten(img)
+        return img
 
     def insert_selection(self):
         img = self._selection_image()
         if img is None:
             return
         if self._insert_figure(img):
+            self.page_view.clear_selection()
+            self.a_crop.setChecked(False)
+
+    def straighten_selection(self):
+        img = self._selection_image(prepared=False)
+        if img is None:
+            return
+        dlg = StraightenDialog(img, self)
+        if dlg.exec() and self._insert_figure(dlg.result_image()):
             self.page_view.clear_selection()
             self.a_crop.setChecked(False)
 
